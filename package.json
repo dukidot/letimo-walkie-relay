@@ -1,0 +1,15 @@
+{
+  "name": "letimo-odgovorno-walkie-relay",
+  "version": "1.0.0",
+  "description": "Jednostavan WebSocket relay za 'dalji kanal' virtualnog walkie-talkieja u Letimo Odgovorno aplikaciji.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
