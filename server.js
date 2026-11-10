@@ -1,11 +1,12 @@
 // Letimo Odgovorno - walkie-talkie "dalji kanal" relay server.
 //
 // Vrlo jednostavan WebSocket relay: svaki klijent se spoji na /ws?channel=<ime>,
-// server ga stavi u "sobu" s tim imenom, i svaku BINARNU poruku (sirovi zvučni
-// paket) koju jedan klijent pošalje odmah proslijedi SVIM OSTALIM klijentima u
-// istoj sobi (ne i pošiljatelju natrag). Server ne sprema, ne dekodira i ne
-// razumije zvuk - samo prosljeđuje bajtove, zato je jednostavan i jeftin za
-// hostati (ne treba baza, ne treba puno RAM-a/CPU-a).
+// server ga stavi u "sobu" s tim imenom, i svaku poruku koju jedan klijent pošalje -
+// BINARNU (sirovi zvučni paket) ili TEKSTUALNU (npr. "P|Ime" - povremena najava
+// prisutnosti pilota, da ostali znaju tko je na kanalu) - odmah proslijedi SVIM
+// OSTALIM klijentima u istoj sobi (ne i pošiljatelju natrag). Server ne sprema, ne
+// dekodira i ne razumije ni zvuk ni tekst sadržaj - samo prosljeđuje poruke, zato je
+// jednostavan i jeftin za hostati (ne treba baza, ne treba puno RAM-a/CPU-a).
 //
 // Namjerno NEMA autentifikacije/enkripcije sadržaja (osim same WSS/TLS veze
 // koju daje hosting) - za pravu udrugu dovoljno je da ime kanala bude "tajna"
@@ -81,14 +82,11 @@ wss.on("connection", (ws, req) => {
 
   ws.on("message", (data, isBinary) => {
     ws.__lastActive = Date.now();
-    if (!isBinary) {
-      // Tekstualne poruke koristimo samo kao "ping" da veza ostane živa -
-      // ne treba ih dalje raditi ništa s njima.
-      return;
-    }
+    // I binarne (audio) i tekstualne (npr. "P|Ime" - prisutnost/ime pilota) poruke se
+    // jednako prosljeđuju svima ostalima u sobi - server ih ne razumije, samo prenosi.
     for (const peer of room) {
       if (peer !== ws && peer.readyState === peer.OPEN) {
-        peer.send(data, { binary: true });
+        peer.send(data, { binary: isBinary });
       }
     }
   });
