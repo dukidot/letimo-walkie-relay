@@ -20,7 +20,7 @@ const { URL } = require("url");
 
 const PORT = process.env.PORT || 8080;
 // Spriječi da jedna soba naraste beskonačno (zaštita od greške/zlouporabe).
-const MAX_CLIENTS_PER_ROOM = 40;
+const MAX_CLIENTS_PER_ROOM = 8;
 // Ako klijent ništa ne pošalje (ni audio ni ping) ovoliko dugo, smatramo ga
 // mrtvim i zatvaramo vezu - inače bi "zombie" veze ostale otvorene zauvijek
 // (npr. telefon je izgubio signal bez urednog zatvaranja utičnice).
