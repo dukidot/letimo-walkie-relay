@@ -18,8 +18,38 @@ const http = require("http");
 const { WebSocketServer } = require("ws");
 const { URL } = require("url");
 const admin = require("firebase-admin");
+const fs = require("fs");
+const path = require("path");
 
 const PORT = process.env.PORT || 8080;
+
+// --- "Imenik" poznatih pilota (za padajući popis kod ciljanog "Pozovi") ----------------
+// NIJE prava baza podataka - obična JSON datoteka na disku servera. Svaki uređaj se sam
+// "prijavi" svojim imenom (vidi POST /register-name) čim otvori walkie-talkie ekran, pa se
+// popis sam od sebe održava/popunjava - čak i ako se ova datoteka povremeno izgubi (npr.
+// kod redeploya na Renderu), prvi sljedeći put kad piloti otvore app, imena se vrate.
+// Sadrži SAMO imena/nadimke koje su piloti sami upisali - ništa osjetljivo.
+const NAMES_FILE = path.join(__dirname, "known_names.json");
+let knownNames = new Set();
+try {
+  const raw = fs.readFileSync(NAMES_FILE, "utf8");
+  const arr = JSON.parse(raw);
+  if (Array.isArray(arr)) {
+    arr.forEach((n) => {
+      if (typeof n === "string" && n.trim()) knownNames.add(n.trim());
+    });
+  }
+} catch {
+  // Datoteka još ne postoji (prvi put) ili je oštećena - počni od praznog popisa.
+}
+
+function saveKnownNames() {
+  try {
+    fs.writeFileSync(NAMES_FILE, JSON.stringify([...knownNames]));
+  } catch (e) {
+    console.error("Ne mogu spremiti known_names.json:", e.message);
+  }
+}
 
 // --- "Pozovi ostale" (push obavijest preko Firebase Cloud Messaging) -------------------
 // Treba FIREBASE_SERVICE_ACCOUNT environment varijablu na hostingu (Render -> Environment),
@@ -57,14 +87,51 @@ const server = http.createServer((req, res) => {
     handleCallRequest(req, res);
     return;
   }
+  if (req.method === "POST" && req.url === "/register-name") {
+    handleRegisterName(req, res);
+    return;
+  }
+  if (req.method === "GET" && req.url === "/names") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify([...knownNames].sort((a, b) => a.localeCompare(b, "hr"))));
+    return;
+  }
   // Jednostavan "health check" endpoint - korisno za hosting platforme koje
   // provjeravaju je li servis živ, i za ručnu provjeru u pregledniku.
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("Letimo Odgovorno walkie-talkie relay radi.\n");
 });
 
-/** POST /call {"callerName": "...", "channel": "..."} - šalje push obavijest svim
- * uređajima pretplaćenima na [CALL_TOPIC] (vidi Android WalkieCallMessagingService). */
+/** POST /register-name {"name": "..."} - zapamti ime u "imeniku" (vidi gore) da se pojavi
+ * u padajućem popisu za ciljano zvanje. Poziva se automatski iz app-a, ne treba ga pilot
+ * ručno zvati niti zna da se to događa. */
+function handleRegisterName(req, res) {
+  let body = "";
+  req.on("data", (chunk) => {
+    body += chunk;
+    if (body.length > 1024) req.destroy();
+  });
+  req.on("end", () => {
+    try {
+      const parsed = JSON.parse(body || "{}");
+      const name = typeof parsed.name === "string" ? parsed.name.trim().slice(0, 64) : "";
+      if (name) {
+        const wasNew = !knownNames.has(name);
+        knownNames.add(name);
+        if (wasNew) saveKnownNames();
+      }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: "Neispravan JSON." }));
+    }
+  });
+}
+
+/** POST /call {"callerName": "...", "channel": "...", "target": "..."} - šalje push obavijest
+ * ili SVIMA pretplaćenima na [CALL_TOPIC] (ako "target" nije upisan), ili SAMO toj jednoj
+ * osobi (ako jest - vidi personalTopicFor i Android WalkieCallMessagingService). */
 function handleCallRequest(req, res) {
   if (!firebaseReady) {
     res.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
@@ -81,6 +148,7 @@ function handleCallRequest(req, res) {
   req.on("end", async () => {
     let callerName = "Netko";
     let channel = "";
+    let target = "";
     try {
       const parsed = JSON.parse(body || "{}");
       if (typeof parsed.callerName === "string" && parsed.callerName.trim()) {
@@ -89,19 +157,26 @@ function handleCallRequest(req, res) {
       if (typeof parsed.channel === "string") {
         channel = parsed.channel.trim().slice(0, 64);
       }
+      if (typeof parsed.target === "string") {
+        target = parsed.target.trim().slice(0, 64);
+      }
     } catch {
       res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: false, error: "Neispravan JSON." }));
       return;
     }
 
+    // Ako je "target" upisan, poziv ide SAMO na osobnu temu te osobe (ne čuju ga ostali na
+    // kanalu) - inače ide na opću temu CALL_TOPIC (svi s instaliranom app).
+    const topic = target ? personalTopicFor(target) : CALL_TOPIC;
+
     try {
       await admin.messaging().send({
-        topic: CALL_TOPIC,
+        topic,
         // Samo "data" poruka (ne "notification") - Android app sam gradi obavijest u
         // WalkieCallMessagingService, tako da radi identično na svim verzijama Androida
         // i dok je app zatvorena.
-        data: { callerName, channel },
+        data: { callerName, channel, private: target ? "1" : "0" },
         android: { priority: "high" }
       });
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -112,6 +187,26 @@ function handleCallRequest(req, res) {
       res.end(JSON.stringify({ ok: false, error: "Slanje push poruke nije uspjelo." }));
     }
   });
+}
+
+/** Pretvori korisnički upisano ime u ispravno/sigurno ime FCM teme (samo mala slova, brojevi
+ * i donja crta). VAŽNO: ISTA ova logika MORA postojati i na Android strani (vidi
+ * WalkieCallMessagingService.kt, funkcija personalTopicFor) - ako se ovdje promijeni
+ * algoritam, mora se promijeniti i tamo, inače ciljani poziv ode na krivu/nepostojeću
+ * temu i primatelj ga nikad ne čuje, bez ikakve vidljive greške. */
+function personalTopicFor(name) {
+  const lower = name
+    .trim()
+    .toLowerCase()
+    .replace(/č/g, "c")
+    .replace(/ć/g, "c")
+    .replace(/š/g, "s")
+    .replace(/ž/g, "z")
+    .replace(/đ/g, "d");
+  const onlySafeChars = lower.replace(/[^a-z0-9]/g, "_");
+  const collapsed = onlySafeChars.replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+  const safe = (collapsed || "osoba").slice(0, 40);
+  return `poziv_${safe}`;
 }
 
 const wss = new WebSocketServer({ server, path: "/ws" });
